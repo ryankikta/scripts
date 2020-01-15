@@ -1,0 +1,7 @@
+!#/bin/bash
+
+wget -qO- https://raw.githubusercontent.com/creationix/nvm/v0.34.0/install.sh | bash
+export NVM_DIR="$HOME/.nvm"
+command -v nvm
+nvm install 12.14.0
+npm install -g sitemap-generator-cli
