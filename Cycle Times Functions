@@ -1,0 +1,286 @@
+' **************************************************************************
+' Find what was shipped on a given day and calculate cycle time 11/04/03
+Private Sub CycleNew_Click()
+On Error GoTo ErrorReport
+​
+    Dim db As Database
+    Dim rsTime As Recordset, rsTimeOff As Recordset, rsCell As Recordset, rsTimeToo As Recordset
+    Dim JobCode As Long, AssemblyID As Long, WorkCellID As Long, WorkGroupID As Long, PartGroupID As Long
+    Dim Days As Single, Cell As Integer, Hours As Integer
+    Dim Average As Single
+    Dim StartTime As Date, StopTime As Date, TheDay As Date
+    Dim PartNumber As String, GraphBar As String, ExcelDate As String, CustomerName As String
+    Dim Holidays(10) As Date
+    Dim HolDex As Integer, HD As Integer, i As Integer
+    Dim Averages(10) As Single
+    Dim GlobalTrucker As Long, CustomerID As Long, DeltaMinutes As Long, DeltaHours As Long
+    Dim JobType As Integer      ' 1 = Normal, 2 = Constraint, 3 = First Article Inspection
+    Dim ConstraintCodes As String, JobCodeList As String
+    Dim FirstArticle As Boolean
+    Dim TruckTime As Date, StickerTime As Date
+    
+    Const GraphData1 = "XXXXXOOOOOXXXXXOOOOOXXXXXOOOOOXXXXXOOOOOXXXXXOOOOOXXXXXOOOOOXXXXXOOOOOXXXXXOOOOOXXXXX"
+    Const GraphData2 = "YYYYOOOOOYYYYOOOOOYYYYOOOOOYYYYOOOOOYYYYOOOOOYYYYOOOOOYYYYOOOOOYYYYOOOOOYYYYOOOOOYYYY"
+    
+    mbResult = Me.WorkGroupList.ListIndex
+    WorkGroupID = Me.WorkGroupList.Column(0, mbResult)
+    ConstraintCodes = GetWorkstationIDs(WorkGroupID)
+    FindFirstArticleCode
+        
+    ' Copy the holiday table to an array    12/04/03
+    Set db = CurrentDb
+    SQL1 = "SELECT * FROM [Holidays] "
+    SQL2 = "WHERE [Date] > #" & Date - 30 & "# AND [Date] < #" & Date & "#;"
+    Set rsTimeOff = db.OpenRecordset(SQL1 & SQL2)
+    If (rsTimeOff.RecordCount > 0) Then
+        rsTimeOff.MoveFirst: HolDex = 0
+        While (Not rsTimeOff.EOF)
+            HolDex = HolDex + 1
+            Holidays(HolDex) = rsTimeOff("Date")
+            rsTimeOff.MoveNext
+        Wend
+    End If
+    rsTimeOff.Close
+    
+    ' Truck date or ship date           08/19/13
+    If (Me.StopFrame.Value = 1) Then
+        GlobalTrucker = GetGlobalTruckCode()
+    Else
+        FindGlobalStickerCode
+        GlobalTrucker = GLOBALSTICKERCODE
+    End If
+    CycleGlobalTrucker = GetGlobalTruckCode
+    CycleGlobalKanban = GetGlobalKanBanStockCode
+    
+    Today = Me.StartDate
+    Tomorrow = Me.StopDate
+    If (Tomorrow < Today) Then
+        PlayMySound ("gotaproblem.mp3")
+        Line1 = "The stop date cannot be earlier than the start date"
+        mbResult = MessageBox("OK", "", "", Line1)
+        Exit Sub
+    End If
+    
+    MakeTimeCopy4 Today, Tomorrow   ' Get all the trucks for the selected date
+                                    ' Added Kanban to Stock operation    03/29/11
+    MakeTimeCopy5 (Tomorrow)        ' Get all the job clockings for the last month
+    
+    DoCmd.SetWarnings False
+    DoCmd.RunSQL "DELETE FROM [Parts To Build];"
+    DoCmd.RunSQL "DELETE FROM [Parts To Wait];"
+    
+    SQL1 = "SELECT * FROM [Time Copy] WHERE [Workstation Code] = " & GlobalTrucker & ";" ' AND [Manufacturing Code] = 390916;"
+    Set rsTime = db.OpenRecordset(SQL1)
+    If (rsTime.RecordCount > 0) Then
+        rsTime.MoveLast: rsTime.MoveFirst
+        BarScaler = Me.PercentComplete.Width / rsTime.RecordCount
+        ProgressBar Me, True
+        While (Not rsTime.EOF)
+            JobCode = rsTime("Manufacturing Code")
+            
+            AssemblyID = GetAssemblyIDFromCode(JobCode)
+            WorkCellID = GetWorkCellIDAID(AssemblyID)
+            JobCodeList = FindSubAssemblyTickets(JobCode)
+            PartNumber = GetPartNumberAID(AssemblyID)
+            CustomerID = GetCustomerID(JobCode)
+            PartGroupID = GetPartGroupID(AssemblyID)
+            
+            ' No Kanban parts (They all take 10 minutes and would skew our data)    03/31/11
+            ' Chad says Stanchion or Mon Panels should not be included              12/09/11
+            ' Chad says to omit PPG frpm this calculation                           08/06/13
+            If ((InStr(PartNumber, "KB") = 0) And (WorkCellID > 0) And (CustomerID <> 159) And (PartGroupID <> 51) And (PartGroupID <> 93) And (CustomerID <> 189)) Then
+                ' Was there a First Article Inspection
+                SQL1 = "[Manufacturing Code] IN " & JobCodeList & " AND [Workstation Code] = " & GLOBALFIRSTARTICLE
+                vResult = DLookup("[Time Clock]", "[Time Copy Too]", SQL1)
+                If (IsNull(vResult)) Then
+                    FirstArticle = False
+                Else
+                    FirstArticle = True
+                End If
+                
+                ' Different plan for Truck or Sticker    04/04/11
+                If (Me.StopFrame.Value = 1) Then
+                    ' If this part has been trucked off more than once
+                    ' then use the first clock after the earlier truck off  02/09/04
+                    SQL1 = "[Time Clock] < #" & Me.StartDate & "# AND [Manufacturing Code] = " & JobCode & " AND "
+                    SQL2 = "[Workstation Code] = " & GlobalTrucker
+                    vResult = DMax("[Time Clock]", "[Time Copy Too]", SQL1 & SQL2)
+                    If (IsNull(vResult)) Then
+                        ' Find the earliest clock in for this job
+                        vResult = DMin("[Time Clock]", "[Time Copy Too]", "[Manufacturing Code]  IN " & JobCodeList)
+                    Else
+                        ' Find the earliest clock in for this job that is AFTER the earlier truck off
+                        StopTime = vResult
+                        SQL1 = "[Time Clock] > #" & StopTime & "#"
+                        vResult = DMin("[Time Clock]", "[Time Copy]", SQL1)
+                    End If
+                Else
+                    ' Just a test for today to measure time between sticker and truck   04/05/11
+                    ' Test over                                                         04/11/11
+                    If (1 = 2) Then
+                        
+                    Else
+                        ' If this part has been Stickered more than once
+                        ' then use the first clock after the earlier Sticker
+                        SQL1 = "[Time Clock] < #" & Me.StartDate & "# AND [Manufacturing Code] = " & JobCode & " AND "
+                        SQL2 = "[Workstation Code] = " & GLOBALSTICKERCODE
+                        vResult = DMax("[Time Clock]", "[Time Copy Too]", SQL1 & SQL2)
+                        If (IsNull(vResult)) Then
+                            ' Find the earliest clock in for this job
+                            vResult = DMin("[Time Clock]", "[Time Copy Too]", "[Manufacturing Code]  IN " & JobCodeList)
+                        Else
+                            ' Find the earliest clock in for this job that is AFTER the earlier Stickering
+                            StopTime = vResult
+                            SQL1 = "[Time Clock] > #" & StopTime & "#"
+                            vResult = DMin("[Time Clock]", "[Time Copy]", SQL1)
+                        End If
+                    End If
+                End If
+                
+                If (Not IsNull(vResult)) Then
+                    StartTime = vResult
+                    StopTime = rsTime("Time Clock")
+                    
+                    ' Does this job use the Constraint
+                    SQL1 = "[Assembly ID] = " & AssemblyID & " AND [Workstation ID] IN " & ConstraintCodes
+                    vResult = DCount("[Workstation ID]", "[AWS Intersection]", SQL1)
+                    If (IsNull(vResult)) Then
+                        JobType = 1             ' Normal
+                    ElseIf (vResult > 0) Then
+                        JobType = 2             ' Goes through Constraint
+                    ElseIf (vResult = 0) Then
+                        JobType = 1             ' Normal
+                    End If
+                        
+                    Hours = DateDiff("h", StartTime, StopTime)
+                    Days = Hours / 24
+                    
+                    ' Remove weekend days
+                    Yesterday = Format(StartTime, "mm/dd/yyyy")
+                    Tomorrow = Format(StopTime, "mm/dd/yyyy")
+                    For TheDay = Yesterday To Tomorrow
+                        Line1 = Format(TheDay, "ddd")
+                        If ((Line1 = "Sat") Or (Line1 = "Sun")) Then
+                            Days = Days - 1
+                        End If
+                        ' Is this day a holiday
+                        ' Look in saved array for holiday dates and remove them too 12/04/03
+                        For HD = 1 To HolDex
+                            If (Holidays(HD) = TheDay) Then
+                                Days = Days - 1
+                            End If
+                        Next HD
+                    Next TheDay
+                    If (Days > 13) Then
+                        ' Prepend number of days if too much to graph
+                        Select Case (JobType)
+                            Case 1: GraphBar = CInt(Days) & " Days    " & Left(GraphData1, 13 * 5)
+                            Case 2: GraphBar = CInt(Days) & " Days    " & Left(GraphData2, 13 * 5)
+                        End Select
+                    Else
+                        If (Days = 15) Then Days = 14   ' Leave room for number at the beginning
+                        If (Days < 0) Then Days = 0.25
+                        ' GraphBar = Left(GraphData, (Days + 1) * 5)
+                        Select Case (JobType)
+                            Case 1: GraphBar = Left(GraphData1, Days * 5)
+                            Case 2: GraphBar = Left(GraphData2, Days * 5)
+                        End Select
+                        
+                        If (Len(GraphBar) < 1) Then
+                            GraphBar = "X"
+                        End If
+                    End If
+                    ' Is this Job Code already in the table     09/23/16
+                    vResult = DLookup("[Job Number]", "[Parts To Build]", "[Job Number] = " & JobCode)
+                    If (IsNull(vResult)) Then
+                        CustomerName = GetCustomerName(CustomerID)
+                        SQL1 = "INSERT INTO [Parts To Build] "
+                        SQL2 = "( [Part Number], [Job Number], [Customer], [Work Cell ID], [Days], [Processed], [Description] ) VALUES "
+                        SQL3 = "( '" & PartNumber & "', " & JobCode & ", '" & CustomerName & "', " & WorkCellID & ", " & Days & ", " & FirstArticle & ", '" & GraphBar & "' );"
+                        DoCmd.RunSQL SQL1 & SQL2 & SQL3
+                    End If
+                End If
+            End If
+            rsTime.MoveNext
+            ProgressBarMove Me
+            DoEvents
+        Wend
+    End If
+    rsTime.Close
+    db.Close
+    ProgressBar Me, False
+    
+    ' Now do the averages for each work cell    10/27/06
+    Cell = 0
+    Set db = CurrentDb
+    SQL1 = "SELECT * FROM [Work Cells] "
+    SQL2 = "WHERE [Work Cell ID] IN ( 1, 2, 3, 4, 11 ) "
+    SQL3 = "ORDER BY [Work Cell ID];"
+    Set rsCell = db.OpenRecordset(SQL1 & SQL2 & SQL3)
+    If (rsCell.RecordCount > 0) Then
+        rsCell.MoveFirst
+        While (Not rsCell.EOF)
+            Cell = Cell + 1
+            ' Get the total days
+            vResult = DSum("[Days]", "[Parts To Build]", "[Work Cell ID] = " & rsCell("Work Cell ID"))
+            If (Not IsNull(vResult)) Then
+                Days = vResult
+                Line1 = rsCell("Work Cell ID")
+                ' Get the number of line items
+                vResult = DCount("[Days]", "[Parts To Build]", "[Work Cell ID] = " & rsCell("Work Cell ID"))
+                Average = Days / vResult
+                SQL1 = "UPDATE [Parts To Build] SET [Average] = " & Average & " "
+                SQL2 = "WHERE [Work Cell ID] = " & rsCell("Work Cell ID") & ";"
+                DoCmd.RunSQL SQL1 & SQL2
+                Averages(Cell) = Format(Average, "#0.0")
+            End If
+            rsCell.MoveNext
+        Wend
+    End If
+    rsCell.Close
+    db.Close
+    
+    ' Save Averages to spreadsheet      09/14/05
+    If (RunningDailyReports) Then
+        ExcelDate = Format(Me.StartDate, "mm/dd/yy")
+        SQL1 = "INSERT INTO [XXX Cycle] "
+        SQL2 = "( [Ship Date], [Copper], [Large OD], [Small OD] ) VALUES "
+        SQL3 = "( '" & ExcelDate & "', " & Averages(2) & ", " & Averages(3) & ", " & Averages(4) & " );"
+        DoCmd.RunSQL SQL1 & SQL2 & SQL3
+    End If
+    
+RunReportAnyway:
+    
+    Label3 = Me.StartDate
+    
+    ' If automatically running daily reports then exit  04/26/07
+    If (RunningDailyReports) Then
+        CloseForm_Click
+    Else
+        PrintCycleCount_Click
+    End If
+    
+Exit_This_Function:
+    Exit Sub
+​
+ErrorReport:
+    mbResult = Err.Number
+    If (mbResult = 3078) Then
+        Line1 = "The Excel File 'Cycle Average' cannot be written, because either" & LF & LF & _
+                "It does not exist" & LF & _
+                "It is not in the correct folder" & LF & _
+                "Or it has not been linked to your database" & LF & LF & _
+                "See your Database Administrator" & LF & LF & _
+                "Your report will print normally"
+        mbResult = MessageBox("OK", "", "", Line1)
+        RunReport = True
+        GoTo RunReportAnyway
+    End If
+    MsgBox Err.Description
+    ErrorMessage = Err.Number & " " & Err.Description
+    Modulename = Me.Name
+    FunctionName = "CycleNew_Click"
+    LogProgramError
+    Resume Exit_This_Function
+    
+End Sub
