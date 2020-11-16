@@ -14,10 +14,10 @@ require('/home/user/public_html/wp-load.php');
 */
 
 // Create A Connection
-$dbhost = "35.184.141.59";
-$dbuser = "nuvane_wrdp1";
-$dbpass ="v[8KQEcOe2EQ";
-$db = "nuvane_wrdp1";
+$dbhost = 
+$dbuser = 
+$dbpass =
+$db = 
 
 //MYSQLI VARIATION
 //$mysqli = new mysqli($dbhost, $dbuser, $dbpass, $db);
